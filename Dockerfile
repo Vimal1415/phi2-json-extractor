@@ -43,11 +43,11 @@ ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
 # Tell Docker this container listens on port 8000.
 # This doesn't publish the port — it documents it.
 # The actual port mapping happens when you run the container.
-EXPOSE 8000
+EXPOSE 7860
 
 # ── Stage 8: Start command ────────────────────────────────────
 # This runs when the container starts.
 # host 0.0.0.0 means accept connections from outside the container.
 # Without 0.0.0.0, the server only accepts internal connections
 # and you can never reach it from your browser or from Render.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
