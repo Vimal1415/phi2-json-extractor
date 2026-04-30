@@ -1,0 +1,121 @@
+# .github/workflows/ci.yml
+# ─────────────────────────────────────────────────────────────
+# CI/CD Pipeline for Phi-2 JSON Extractor
+#
+# Triggers: every push to main branch
+# Jobs:
+#   1. test  — runs eval suite, blocks if accuracy < 85%
+#   2. deploy — deploys to Render if tests pass
+# ─────────────────────────────────────────────────────────────
+
+name: CI/CD Pipeline
+
+# When does this pipeline run?
+on:
+  push:
+    branches: [ main ]      # every push to main
+  pull_request:
+    branches: [ main ]      # every PR targeting main
+
+jobs:
+
+  # ── Job 1: Run eval suite ───────────────────────────────────
+  test:
+    name: Eval Suite — Regression Gate
+    runs-on: ubuntu-latest  # fresh Ubuntu VM, free on GitHub
+
+    steps:
+
+      # Step 1 — Download your code onto the VM
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2 — Install Python 3.11
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Step 3 — Cache pip packages
+      # This saves the installed packages between runs
+      # so we don't reinstall torch every time (saves 5 mins)
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Step 4 — Install all dependencies
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Step 5 — Start the FastAPI server in background
+      # The & at the end runs it as a background process
+      # so the pipeline can continue to the next step
+      - name: Start FastAPI server
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}  # your HuggingFace token
+        run: |
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          echo "Server starting..."
+
+      # Step 6 — Wait for server to be ready
+      # The model takes time to load — we poll /health
+      # until it responds or we give up after 30 minutes
+      - name: Wait for server to be ready
+        run: |
+          echo "Waiting for model to load..."
+          for i in $(seq 1 180); do
+            if curl -f http://localhost:8000/health 2>/dev/null; then
+              echo "Server is ready!"
+              break
+            fi
+            echo "Attempt $i/180 — waiting 10 seconds..."
+            sleep 10
+          done
+
+      # Step 7 — Run the eval suite
+      # This is the regression gate.
+      # If accuracy < 85%, this step exits with code 1
+      # GitHub Actions treats exit code 1 as failure
+      # and stops the pipeline — deployment never happens
+      - name: Run eval suite
+        run: |
+          python eval/test_api.py --url http://localhost:8000
+
+      # Step 8 — Upload results as artifact
+      # Even if tests fail, save the results so you can
+      # download and inspect them from GitHub Actions UI
+      - name: Save eval results
+        if: always()    # runs even if previous step failed
+        run: |
+          python eval/test_api.py --url http://localhost:8000 > eval_results.txt 2>&1 || true
+          cat eval_results.txt
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: eval_results.txt
+
+  # ── Job 2: Deploy to Render ─────────────────────────────────
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: test           # only runs if test job passed
+    if: github.ref == 'refs/heads/main'   # only on main branch
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Trigger Render deployment via webhook
+      # Render gives you a deploy hook URL in your service settings
+      # We store it as a GitHub secret (never hardcode URLs)
+      - name: Trigger Render deployment
+        run: |
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+          echo "Deployment triggered on Render"
